@@ -1,0 +1,6 @@
+{
+  "name": "EcoFlow Logistics SaaS",
+  "description": "An interactive infinite mind-mapping, route optimization, and creative logistics canvas powered by the Gemini API in Kurdish Behdini.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
