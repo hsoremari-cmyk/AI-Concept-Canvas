@@ -86,6 +86,11 @@ export default function App() {
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [showVoiceMode, setShowVoiceMode] = useState(false);
+  const [voiceModeTranscribed, setVoiceModeTranscribed] = useState('');
+  const [voiceModeResponse, setVoiceModeResponse] = useState('');
+  const [voiceModeLoading, setVoiceModeLoading] = useState(false);
+  const [voiceType, setVoiceType] = useState<'chat' | 'node'>('chat');
 
   // Refs
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -285,6 +290,173 @@ export default function App() {
     }
   };
 
+  const toggleImmersiveVoiceListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("مخابن! ئامادەکاریێن تۆمارکرنا دەنگی ل سەر ڤێ وێبگەڕێ نینن.");
+      return;
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'ckb-IQ'; // Kurdish Behdini / Sorani
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setVoiceModeTranscribed('');
+      };
+
+      recognition.onresult = async (event: any) => {
+        const text = event.results[0][0].transcript;
+        if (text) {
+          setVoiceModeTranscribed(text);
+          
+          const containsAdvisor = text.includes("راوێژکار") || text.includes("ڕاوێژکار");
+          
+          if (!containsAdvisor) {
+            const fallbackMsg = "من گوه ل تە بوو، بەلێ دڤێت تو بێژی 'ڕاوێژکار' دا ئەز بەرسڤا تە بدەم.";
+            setVoiceModeResponse(fallbackMsg);
+            speakResponse(fallbackMsg);
+            return;
+          }
+
+          const cleanedText = text.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").trim();
+          if (cleanedText === "راوێژکار" || cleanedText === "ڕاوێژکار") {
+            const greetingMsg = "بەلێ هەڤال، ئەز ل ڤێرێ مە، چەوا دێ هاریکاریا تە کەم؟";
+            setVoiceModeResponse(greetingMsg);
+            speakResponse(greetingMsg);
+            return;
+          }
+
+          // Auto-submit transcription to Gemini API for immersive feedback
+          handleVoiceModeSubmit(text);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Immersive speech recognition error:', event.error);
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (e) {
+      console.error(e);
+      setIsListening(false);
+    }
+  };
+
+  const handleVoiceModeSubmit = async (text: string) => {
+    if (!text.trim()) return;
+    if (!isOnline) {
+      speakResponse("هەڤال، ئەز ل هیڤیا ئینتەرنێتێ مە");
+      setVoiceModeResponse("تۆ یێ بێ هێڵی (Offline)! تکایە ئینتەرنێتێ کارا بکە بۆ بەرسڤدانێ.");
+      return;
+    }
+
+    setVoiceModeLoading(true);
+    setVoiceModeResponse('راوێژکار هزر دکەت بۆ بەرسڤدانێ ب کوردییا بەهدینی...');
+
+    try {
+      if (voiceType === 'node') {
+        // Voice-to-Node mode: Generate an elaborated logistics node with Behdini text
+        const response = await fetch('/api/gemini/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: `ئەم بابەتە بە زمانێ کوردی بەهدینی پێشبخە و لایەنێن گرنگی لۆجستی و ژینگەهی یێن کورت دیار بکە.
+بابەت: "${text}"`,
+            systemInstruction: 'تو ڕاوێژکارێ کارێ لۆجستیکی یێ EcoFlow SaaS و بیرۆکەیان ب شێوازێ خاڵێن ڕوون و پوخت ل سەر بابەتێ دروست دکەی ب زمانێ کوردی بەهدینی.'
+          })
+        });
+
+        if (!response.ok) throw new Error('Failed generating node content');
+        const data = await response.json();
+        const content = data.text || 'چ پێزانین نەهاتنە دیتن ل سەر ڤی بابەتی.';
+
+        // Create the node at the center of the viewport
+        const id = `node_voice_${Date.now()}`;
+        const newX = -panOffset.x + (window.innerWidth / 2) - 120;
+        const newY = -panOffset.y + (window.innerHeight / 2) - 100;
+
+        const newNode: CanvasNode = {
+          id,
+          title: text.length > 30 ? `${text.substring(0, 30)}...` : text,
+          content,
+          type: 'concept',
+          x: newX,
+          y: newY
+        };
+
+        // Link with root or selected node if possible
+        const parentNodeId = selectedNodeId || (nodes.length > 0 ? nodes[0].id : null);
+        const newEdges: CanvasEdge[] = [];
+        if (parentNodeId) {
+          newEdges.push({
+            id: `edge_voice_${Date.now()}`,
+            from: parentNodeId,
+            to: id
+          });
+        }
+
+        setNodes(prev => [...prev, newNode]);
+        if (newEdges.length > 0) {
+          setEdges(prev => [...prev, ...newEdges]);
+        }
+        setSelectedNodeId(id);
+
+        const summaryText = `مە نۆدەکا نوی دروستکر ل ژێر ناڤێ: ${text}.`;
+        setVoiceModeResponse(summaryText + " " + content);
+        speakResponse(summaryText);
+      } else {
+        // Conversational AI voice mode
+        const parentNodeContext = selectedNodeId ? nodes.find(n => n.id === selectedNodeId) : null;
+        const contextPrompt = parentNodeContext 
+          ? `پاشخانا کاردێ ل سەر تەختەی: "${parentNodeContext.title} - ${parentNodeContext.content}".\n\n`
+          : '';
+
+        const response = await fetch('/api/gemini/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: `${contextPrompt}پرسیار و داخوازی ب دەنگی: "${text}"`,
+            systemInstruction: 'تو ڕاوێژکارەکێ هێژا و گەرم و نەرمی. بەرسڤەکا کورت و دلکێش ب زمانی کوردی بەهدینیێ پاقژ پێشکێش بکە. د بەرسڤێ دا چ جۆرە ئینگلیزی یان سۆرانی بەکار نەئینه.'
+          })
+        });
+
+        if (!response.ok) throw new Error('Failed to generate response');
+        const data = await response.json();
+        const resText = data.text || 'ببورە، من تو نەبهیستی.';
+        
+        setVoiceModeResponse(resText);
+        speakResponse(resText);
+      }
+    } catch (e: any) {
+      console.error(e);
+      setVoiceModeResponse(`ببورە هەڤال، خەلەتیەک چێبوو: ${e.message}`);
+    } finally {
+      setVoiceModeLoading(false);
+    }
+  };
+
   // Speech Synthesis (ڕاگەیاندنا دەنگی یا راوێژکاری ب زمانێ کوردی)
   const speakResponse = (text: string) => {
     if (!('speechSynthesis' in window)) return;
@@ -298,6 +470,18 @@ export default function App() {
     window.speechSynthesis.cancel(); // Clear any ongoing speech
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'ckb-IQ'; // زمانێ کوردی (کوردیا بەهدینی/سۆرانی)
+    utterance.pitch = 1.0;     // دەنگێ نورمال
+    utterance.rate = 1.0;      // لەزاتیا ئاخفتنا مرۆڤی
+    utterance.volume = 1.0;    // دەنگێ تەمام
+
+    // هەلبژارتنا دەنگێ کو زێدەتر نێزیکێ مرۆڤی بیت
+    if ('getVoices' in window.speechSynthesis) {
+      const voices = window.speechSynthesis.getVoices();
+      const kurdishVoice = voices.find(v => v.lang.includes('ckb') || v.lang.includes('ku'));
+      if (kurdishVoice) {
+        utterance.voice = kurdishVoice;
+      }
+    }
     
     utterance.onend = () => {
       setIsSpeaking(false);
@@ -911,6 +1095,19 @@ export default function App() {
           >
             <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
             <span>رێنماییا موبایلێ</span>
+          </button>
+
+          {/* Immersive Voice Mode button */}
+          <button 
+            onClick={() => {
+              setShowVoiceMode(true);
+              speakResponse("ب خێر هاتی بۆ دەنگووباس دگەل ڕاوێژکاری! هەر بابەتەکێ تە دڤێت باخڤە یان نۆدەکێ دروستبکە.");
+            }}
+            title="دەستپێکرنا دەنگووباس دگەل ڕاوێژکاری"
+            className={`flex items-center space-x-1.5 space-x-reverse px-3 py-2 rounded-lg text-xs font-semibold border transition-all bg-indigo-600/20 border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/25 hover:border-indigo-500/60 animate-pulse cursor-pointer`}
+          >
+            <Mic className="w-3.5 h-3.5 text-indigo-400" />
+            <span>دەنگوباس دگەل راوێژکاری</span>
           </button>
 
           {/* PWA Install Button */}
@@ -1644,6 +1841,184 @@ export const startVoiceService = () => {
                 </pre>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* IMMERSIVE VOICE MODE OVERLAY */}
+        {showVoiceMode && (
+          <div className="absolute inset-0 bg-slate-950/98 backdrop-blur-md z-40 flex flex-col items-center justify-center p-6 text-right font-sans" dir="rtl">
+            
+            {/* Top header with close button */}
+            <div className="absolute top-6 left-6 right-6 flex items-center justify-between flex-row-reverse">
+              <div className="flex items-center space-x-2.5 space-x-reverse">
+                <div className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse shadow-[0_0_8px_rgba(99,102,241,0.5)]" />
+                <span className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-wider">دەنگووباس دگەل ڕاوێژکاری</span>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowVoiceMode(false);
+                  if (isListening && recognitionRef.current) {
+                    recognitionRef.current.stop();
+                  }
+                  if (isSpeaking) {
+                    window.speechSynthesis.cancel();
+                    setIsSpeaking(false);
+                  }
+                }}
+                className="w-8 h-8 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-all cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Immersive sound waves / background detail */}
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.06),transparent_65%)] pointer-events-none" />
+
+            {/* Main content container */}
+            <div className="w-full max-w-lg flex flex-col items-center space-y-8 z-10">
+              
+              {/* Voice mode type switcher */}
+              <div className="bg-slate-900 border border-slate-800 p-1 rounded-xl flex items-center space-x-1 space-x-reverse">
+                <button
+                  onClick={() => setVoiceType('chat')}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    voiceType === 'chat' 
+                      ? 'bg-indigo-600 text-white shadow-md' 
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  چات و گفتوگۆ
+                </button>
+                <button
+                  onClick={() => setVoiceType('node')}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    voiceType === 'node' 
+                      ? 'bg-indigo-600 text-white shadow-md' 
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  دروستکرنا نۆدان ب دەنگ
+                </button>
+              </div>
+
+              {/* Status Indicator */}
+              <div className="text-center space-y-2">
+                <h3 className="text-lg font-bold text-slate-100 font-sans">
+                  {voiceType === 'chat' ? 'ڕاوێژکارێ دەنگی ل هیڤیا تە یە' : 'مایکێ دەنگ بۆ نۆدێ کارا بکە'}
+                </h3>
+                <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed text-center">
+                  {isListening 
+                    ? 'گوهدار دکەم... ل سەر بابەتەکێ لۆجستیکی یان هزرەکا بەهدینی باخڤە' 
+                    : 'کلیکێ ل سەر مایکێ بکە دا دەست ب ئاخفتنێ بکەی'}
+                </p>
+              </div>
+
+              {/* Core Pulse Mic Button */}
+              <div className="relative flex items-center justify-center my-6">
+                
+                {/* Rotating accent border circles */}
+                <div className={`absolute rounded-full border border-dashed border-indigo-500/10 animate-[spin_40s_linear_infinite] ${
+                  isListening ? 'w-56 h-56 border-rose-500/20' : 'w-48 h-48'
+                }`} />
+                <div className={`absolute rounded-full border border-dashed border-emerald-500/10 animate-[spin_20s_linear_infinite_reverse] ${
+                  isListening ? 'w-44 h-44 border-rose-500/15' : 'w-36 h-36'
+                }`} />
+
+                {/* Pulsing glow rings behind the button */}
+                {isListening && (
+                  <>
+                    <div className="absolute w-36 h-36 bg-rose-500/10 rounded-full animate-ping" />
+                    <div className="absolute w-28 h-28 bg-rose-500/20 rounded-full animate-pulse" />
+                  </>
+                )}
+                {!isListening && voiceModeLoading && (
+                  <div className="absolute w-32 h-32 bg-indigo-500/20 rounded-full animate-pulse" />
+                )}
+
+                {/* Big Round Button */}
+                <button
+                  onClick={toggleImmersiveVoiceListening}
+                  style={{
+                    width: '120px',
+                    height: '120px',
+                    borderRadius: '50%',
+                    cursor: 'pointer',
+                  }}
+                  className={`relative flex items-center justify-center border-none shadow-2xl transition-all duration-300 ease-out z-20 ${
+                    isListening 
+                      ? 'bg-rose-600 text-white shadow-rose-600/30 hover:bg-rose-500 scale-[1.05]' 
+                      : voiceModeLoading
+                        ? 'bg-indigo-600 text-white shadow-indigo-600/30 scale-95'
+                        : 'bg-gradient-to-tr from-emerald-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white shadow-indigo-500/20 hover:scale-[1.03]'
+                  }`}
+                >
+                  {voiceModeLoading ? (
+                    <div className="w-8 h-8 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                  ) : isListening ? (
+                    <MicOff className="w-10 h-10 animate-pulse text-white" />
+                  ) : (
+                    <Mic className="w-10 h-10 text-white" />
+                  )}
+                </button>
+              </div>
+
+              {/* Audio feedback player */}
+              {voiceModeResponse && !voiceModeLoading && (
+                <button
+                  onClick={() => speakResponse(voiceModeResponse)}
+                  className={`flex items-center space-x-1.5 space-x-reverse px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                    isSpeaking 
+                      ? 'bg-rose-500/20 border border-rose-500/30 text-rose-300 animate-pulse' 
+                      : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-850 hover:text-white'
+                  }`}
+                >
+                  {isSpeaking ? (
+                    <>
+                      <VolumeX className="w-3.5 h-3.5 text-rose-400 animate-pulse" />
+                      <span>ڕاگرتنا دەنگی</span>
+                    </>
+                  ) : (
+                    <>
+                      <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>دووبارە گوهداریکردن ب دەنگ</span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              {/* Transcribed Speech and AI response panels */}
+              <div className="w-full space-y-4 pt-4 border-t border-slate-900">
+                
+                {/* Speech transcript */}
+                {voiceModeTranscribed && (
+                  <div className="bg-slate-900/60 border border-slate-850 p-4 rounded-xl space-y-1">
+                    <span className="block text-[10px] font-mono text-indigo-400 font-semibold">ئەو تشتێ تە گۆتی:</span>
+                    <p className="text-xs text-slate-200 italic font-medium leading-relaxed">
+                      " {voiceModeTranscribed} "
+                    </p>
+                  </div>
+                )}
+
+                {/* AI advisor response */}
+                {voiceModeResponse && (
+                  <div className="bg-indigo-950/20 border border-indigo-500/10 p-5 rounded-xl space-y-2">
+                    <span className="block text-[10px] font-mono text-emerald-400 font-semibold">بەرسڤا ڕاوێژکاری:</span>
+                    <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                      {voiceModeResponse}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            {/* Offline notification inside voice mode */}
+            {!isOnline && (
+              <div className="absolute bottom-6 bg-rose-950/80 border border-rose-800/40 px-4 py-2 rounded-xl text-[11px] text-rose-200">
+                هەڤال، ئەز ل هیڤیا ئینتەرنێتێ مە! بۆ مایکێ و جێبەجێکرنا فەرمانا ئینتەرنێت پێویستە.
+              </div>
+            )}
+
           </div>
         )}
 
